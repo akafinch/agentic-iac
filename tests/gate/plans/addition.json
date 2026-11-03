@@ -1,0 +1,50 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.13.2",
+  "resource_changes": [
+    {
+      "address": "linode_firewall.web",
+      "mode": "managed",
+      "type": "linode_firewall",
+      "name": "web",
+      "provider_name": "registry.opentofu.org/linode/linode",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "label": "web",
+          "inbound_policy": "DROP",
+          "outbound_policy": "ACCEPT",
+          "inbound": [
+            {
+              "label": "https-from-anywhere",
+              "action": "ACCEPT",
+              "protocol": "TCP",
+              "ports": "443",
+              "ipv4": ["0.0.0.0/0"],
+              "ipv6": ["::/0"]
+            },
+            {
+              "label": "ssh-from-admin",
+              "action": "ACCEPT",
+              "protocol": "TCP",
+              "ports": "22",
+              "ipv4": ["203.0.113.7/32"],
+              "ipv6": null
+            }
+          ],
+          "outbound": null
+        },
+        "after_unknown": {
+          "id": true,
+          "inbound": [
+            {"ipv4": [false], "ipv6": [false]},
+            {"ipv4": [false]}
+          ],
+          "status": true,
+          "version": true
+        }
+      }
+    }
+  ]
+}

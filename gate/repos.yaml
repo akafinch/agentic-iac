@@ -1,0 +1,40 @@
+# Atlantis's server-side repo config (server.yaml's repo-config): the gate's workflow and policy
+# tiers. It stays on the platform VM, and a repository can override none of it. Atlantis parses it
+# strictly: an unknown key is an error.
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/runatlantis.io/docs/server-side-repo-config.md
+repos:
+  - id: /.*/
+    workflow: gate
+    # Apply only a mergeable change. Policy checks add policies_passed: every set passed, or a
+    # failing set approved by its owners.
+    # https://github.com/runatlantis/atlantis/blob/v0.49.0/server/core/config/raw/global_cfg.go
+    apply_requirements: [mergeable]
+    policy_check: true
+    allowed_overrides: []
+    allow_custom_workflows: false
+
+workflows:
+  gate:
+    plan:
+      steps:
+        # The code check, then init with the pipeline's own provider and state backend.
+        - run: /opt/agentic-iac/gate/init-shard.sh
+        - plan
+
+# No top-level owners. No conftest_version either, so Atlantis runs the conftest on its PATH.
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/runatlantis.io/docs/policy-checking.md,
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/server/core/runtime/policy/conftest_client.go
+policies:
+  policy_sets:
+    # No owners: nobody can approve a block, so the agent revises the change.
+    # https://github.com/runatlantis/atlantis/blob/v0.49.0/server/core/config/valid/policies.go
+    - name: block
+      source: local
+      path: /opt/agentic-iac/gate/policy/block
+    # Only the reader approves a routed plan, never the change's author.
+    - name: route
+      source: local
+      path: /opt/agentic-iac/gate/policy/route
+      owners:
+        users: [reader]
+      prevent_self_approve: true

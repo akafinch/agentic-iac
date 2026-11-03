@@ -1,0 +1,14 @@
+[project]
+name = "agentic-iac"
+version = "0.1.0"
+description = "When a model writes the infrastructure code, where do state, policy and approval live? A working answer on Akamai Cloud."
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "crewai==1.15.33",
+    "fastapi==0.162.0",
+    "uvicorn==0.54.0",
+]
+
+[dependency-groups]
+dev = ["pytest"]

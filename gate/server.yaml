@@ -1,0 +1,32 @@
+# Atlantis's server flags (atlantis server --config /opt/agentic-iac/gate/server.yaml): the gate's
+# half of them. The platform's own settings (forge address, credentials, port, OpenTofu) come from
+# the service's environment, which outranks this file.
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/runatlantis.io/docs/server-configuration.md
+
+# Plan each change atop the default branch: after taking a shard's lock, Atlantis merges the
+# default branch in again, so a queued change plans on what the change before it merged.
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/runatlantis.io/docs/checkout-strategy.md
+checkout-strategy: merge
+
+# Merge what was applied. The change's lock lasts from its plan until that merge, or its close.
+automerge: true
+
+# Judge every saved plan against the policy sets in repos.yaml before it may be applied.
+enable-policy-checks: true
+
+# No unlock and no cancel: no comment frees another change's lock.
+allow-commands: version,plan,apply,approve_policies
+
+# Comment flags (after "--") that would skip the lock or reshape what a plan covers; -var-file would
+# also read a file of the commenter's choosing on this machine. Matched by flag name.
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/server/events/comment_parser.go,
+# https://github.com/opentofu/opentofu/blob/v1.13.2/website/docs/cli/commands/plan.mdx
+blocked-extra-args: "-lock,-target,-exclude,-replace,-destroy,-refresh-only,-var-file"
+
+# The workflow and the policy tiers, kept here on the platform VM, out of the agent's reach.
+repo-config: /opt/agentic-iac/gate/repos.yaml
+
+# A change that touches no shard plans nothing, and with this set its apply returns before
+# automerge, so the pipeline never merges a change it planned nothing for.
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/server/events/apply_command_runner.go
+silence-no-projects: true

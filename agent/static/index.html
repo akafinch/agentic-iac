@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ask the agent</title>
+<!-- Text only: OpenTofu's file() embeds this page in the agent VM's user data. -->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #111111; --muted: #555555; --line: #cccccc; --panel: #f4f4f4;
+    --pass: #0a6b2e; --block: #b3261e; --route: #8a5300; --link: #0b4fb3;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 22px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 20px 28px 0; }
+  h1 { margin: 0; font-size: 40px; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  form { padding: 16px 28px; display: grid; gap: 12px; max-width: 1400px; }
+  textarea { width: 100%; min-height: 3.4em; font: inherit; padding: 10px 12px; border: 2px solid var(--line); border-radius: 8px; }
+  fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 28px; flex-wrap: wrap; }
+  label { cursor: pointer; }
+  input[type=radio] { width: 22px; height: 22px; vertical-align: -3px; }
+  button { justify-self: start; font: inherit; font-weight: 700; padding: 10px 26px; border: 0; border-radius: 8px; background: var(--fg); color: var(--bg); cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  #runs { display: grid; grid-template-columns: repeat(auto-fit, minmax(620px, 1fr)); gap: 20px; padding: 0 28px 28px; }
+  .run { border: 3px solid var(--line); border-radius: 10px; padding: 14px 18px; min-width: 0; }
+  .run h2 { margin: 0; font-size: 28px; }
+  .meta { margin: 2px 0 10px; color: var(--muted); }
+  .request { font-weight: 600; margin: 0 0 8px; }
+  .event { margin: 10px 0; }
+  .tool { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-weight: 700; }
+  .note { font-style: italic; color: var(--muted); }
+  .answer { border-left: 6px solid var(--line); padding-left: 12px; }
+  pre { margin: 6px 0 0; padding: 10px 12px; background: var(--panel); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.4 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; max-height: 22em; overflow: auto; }
+  .bad { color: var(--block); font-weight: 700; }
+  .warn { color: var(--route); font-weight: 700; }
+  .good { color: var(--pass); font-weight: 700; }
+  a { color: var(--link); font-weight: 700; }
+  .done { font-size: 26px; font-weight: 700; padding: 8px 12px; border-radius: 8px; background: var(--panel); }
+  .run.merged { border-color: var(--pass); }
+  .run.closed, .run.failed { border-color: var(--block); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ask the agent for a change</h1>
+  <p>The agent writes OpenTofu and proposes it. The pipeline plans it, policy judges the plan, and only the pipeline applies it.</p>
+</header>
+
+<form id="ask">
+  <label for="request">Your request</label>
+  <textarea id="request" required maxlength="2000">Add a firewall that allows HTTPS and SSH from anywhere.</textarea>
+  <fieldset>
+    <label><input type="radio" name="shard" value="demo" checked> shards/demo, the shared state: changes queue</label>
+    <label><input type="radio" name="shard" value="new"> a new shard: its own state, so it runs in parallel</label>
+  </fieldset>
+  <button type="submit">Ask the agent</button>
+</form>
+
+<main id="runs"></main>
+
+<script>
+"use strict";
+
+const form = document.getElementById("ask");
+const runs = document.getElementById("runs");
+
+form.addEventListener("submit", async (submitted) => {
+  submitted.preventDefault();
+  const button = form.querySelector("button");
+  button.disabled = true;
+  try {
+    const response = await fetch("/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: document.getElementById("request").value.trim(),
+        shard: form.querySelector("input[name=shard]:checked").value,
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    follow(await response.json());
+  } catch (error) {
+    alert("The run did not start: " + error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// One panel per run, fed by its event stream. Everything shown is set as text, never as HTML.
+function follow(run) {
+  const panel = add(runs, "section", "run");
+  runs.prepend(panel);
+  add(panel, "h2", "", run.id);
+  const meta = add(panel, "p", "meta");
+  const log = add(panel, "div");
+  let modelCalls = 0;
+  const showMeta = () => { meta.textContent = run.shard + " · model calls: " + modelCalls; };
+  showMeta();
+
+  const source = new EventSource("/runs/" + encodeURIComponent(run.id) + "/events");
+  // A reconnecting stream replays the run from its start, so start the log over.
+  source.onopen = () => { log.replaceChildren(); modelCalls = 0; showMeta(); };
+  source.onmessage = (message) => {
+    const event = JSON.parse(message.data);
+    if (event.kind === "model") { modelCalls += 1; showMeta(); return; }
+    show(log, event);
+    if (event.kind === "done") {
+      panel.classList.add(event.outcome === "merged" ? "merged" : event.outcome === "closed" ? "closed" : "failed");
+      source.close();
+    }
+  };
+}
+
+function show(log, event) {
+  const row = add(log, "div", "event");
+  if (event.kind === "start") {
+    add(row, "p", "request", "“" + event.request + "”");
+  } else if (event.kind === "call") {
+    const args = Object.assign({}, event.args);
+    const content = args.content;
+    delete args.content;
+    const brief = Object.entries(args).map(([name, value]) => name + "=" + JSON.stringify(value)).join(", ");
+    add(row, "div", "tool", "→ " + event.tool + "(" + brief + ")");
+    if (content !== undefined) add(row, "pre", "", content === "" ? "(empty file)" : content);
+  } else if (event.kind === "result") {
+    lines(add(row, "pre"), event.text);
+  } else if (event.kind === "change") {
+    const link = add(row, "a", "", "Change #" + event.number + " in the forge");
+    if (/^https?:\/\//.test(event.url)) link.href = event.url;
+    link.target = "_blank";
+    link.rel = "noopener";
+  } else if (event.kind === "note") {
+    add(row, "div", "note", event.text);
+  } else if (event.kind === "answer") {
+    add(row, "div", "answer", event.text);
+  } else if (event.kind === "done") {
+    add(row, "div", "done " + (event.outcome === "merged" ? "good" : "bad"), event.text);
+  }
+}
+
+// Colour the pipeline's verdict lines in a tool result.
+function lines(pre, text) {
+  for (const line of String(text).split("\n")) {
+    let kind = "";
+    if (/^(BLOCK|BLOCKED|REFUSED|FAILED)\b/.test(line)) kind = "bad";
+    else if (/^(ROUTE|ROUTED)\b/.test(line)) kind = "warn";
+    else if (/^(PASSED|APPLIED)\b/.test(line)) kind = "good";
+    add(pre, "span", kind, line + "\n");
+  }
+}
+
+function add(parent, tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}
+</script>
+</body>
+</html>

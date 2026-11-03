@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars, which git ignores, and fill in. The deploy token stays in your
+# environment: export LINODE_TOKEN before running tofu.
+reader_cidr       = "203.0.113.7/32"
+authorized_keys   = ["ssh-ed25519 AAAA... you@example.com"]
+inference_api_key = "replace-with-your-key"

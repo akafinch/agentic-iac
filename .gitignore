@@ -21,3 +21,9 @@
 # ── language ignore's bare `build/` or `*.tfvars.json` silently drops the Terraform from
 # ── what ships. After any addition, this must print nothing:
 # ──   git check-ignore build/infra/main.tf build/infra/adp.auto.tfvars.json
+
+# Python: the project's virtual environment and caches (uv run creates .venv).
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/

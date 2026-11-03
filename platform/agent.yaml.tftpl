@@ -1,0 +1,92 @@
+#cloud-config
+# The agent VM's first boot: the web interface and its service, which starts one agent per request
+# (your checkout's agent/). build/infra/compute.tf renders this file. cloud-init runs it once: it
+# writes the files, installs the packages, then runs runcmd.
+# https://github.com/canonical/cloud-init/blob/26.2/config/cloud.cfg.tmpl (as-of 2026-11-02)
+#
+# This VM holds only its own credentials: the inference key, a read-only token and the agent's forge
+# identity, which can push its own branches but can neither approve nor merge.
+
+package_update: true
+packages:
+  - python3-venv  # the service's environment, on Ubuntu 24.04's Python 3.12
+
+# Every file lands root-owned, since the agent user doesn't exist until runcmd. Embedded files are
+# gzipped (gz+b64): user data can't exceed 65,535 bytes base64-encoded. A change to any of them
+# changes the user data, which replaces the VM.
+# https://github.com/canonical/cloud-init/blob/26.2/cloudinit/config/cc_write_files.py (as-of 2026-11-02)
+write_files:
+  # The service, verbatim and read-only to it. __pycache__/ is skipped: Python rebuilds it, and its
+  # byte code is neither text that file() can read nor stable from one checkout to the next.
+  # https://docs.python.org/3.12/tutorial/modules.html#compiled-python-files (as-of 2026-10-30)
+%{ for name in fileset("${repo_root}/agent", "**") ~}
+%{ if !strcontains("/${name}", "/__pycache__/") ~}
+  - path: /opt/agentic-iac/agent/${name}
+    permissions: "0644"
+    encoding: gz+b64
+    content: ${base64gzip(file("${repo_root}/agent/${name}"))}
+%{ endif ~}
+%{ endfor ~}
+  - path: /opt/agentic-iac/platform/install-tofu.sh
+    permissions: "0755"
+    encoding: gz+b64
+    content: ${base64gzip(file("${repo_root}/platform/install-tofu.sh"))}
+
+  # The service's settings and secrets, for the agent user alone. The forge is the platform VM, over
+  # the private network; the platform creates reader/infra. CrewAI's telemetry and tracing stay off,
+  # so a run calls no host but the model's endpoint, the forge and the Linode API.
+  # https://docs.crewai.com/en/telemetry (as-of 2026-10-29)
+  - path: /etc/agentic-iac/agent.env
+    permissions: "0400"
+    content: |
+      INFERENCE_ENDPOINT=${inference_endpoint}
+      INFERENCE_MODEL=${inference_model}
+      INFERENCE_API_KEY=${inference_api_key}
+      LINODE_TOKEN=${agent_token}
+      LINODE_PROVIDER_VERSION=${linode_provider_version}
+      FORGE_URL=${forge_url}
+      FORGE_USER=${forge_agent_user}
+      FORGE_PASSWORD=${forge_agent_password}
+      FORGE_REPO=reader/infra
+      CREWAI_DISABLE_TELEMETRY=true
+      CREWAI_TRACING_ENABLED=false
+
+  # Runs from /opt/agentic-iac, so agent.app imports, and each run's process (python -m agent.runner)
+  # finds the same package. Each run keeps its records under the agent user's home. The validate tool
+  # runs tofu from PATH with the local mirror's CLI config.
+  # https://github.com/encode/uvicorn/blob/0.54.0/docs/settings.md (as-of 2026-11-02)
+  - path: /etc/systemd/system/agent.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=The web interface: ask the agent for a change
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      User=agent
+      Group=agent
+      WorkingDirectory=/opt/agentic-iac
+      EnvironmentFile=/etc/agentic-iac/agent.env
+      Environment=TF_CLI_CONFIG_FILE=/opt/agentic-iac/tofu.tfrc
+      ExecStart=/opt/agentic-iac/venv/bin/uvicorn agent.app:app --host 0.0.0.0 --port ${web_port}
+      Restart=on-failure
+
+      [Install]
+      WantedBy=multi-user.target
+
+# One /bin/sh script, a line per item, run once as root after the packages.
+runcmd:
+  - set -e  # stop at the first failure, so that `cloud-init status` reports it
+  # The service's user, with a writable home, owning only its own settings and secrets.
+  - [useradd, --system, --create-home, --home-dir, /var/lib/agent, --shell, /usr/sbin/nologin, agent]
+  - [chown, "agent:agent", /etc/agentic-iac/agent.env]
+  - [/opt/agentic-iac/platform/install-tofu.sh, "${opentofu_version}", "${linode_provider_version}"]
+  # The pinned set from agent/requirements.txt, with the module's pins beside it: pip refuses the
+  # install if the two disagree.
+  # ASSUMPTION (unverified): the pinned set installs on Ubuntu 24.04 in 2 GB.
+  - [python3, -m, venv, /opt/agentic-iac/venv]
+  - [/opt/agentic-iac/venv/bin/pip, install, --requirement, /opt/agentic-iac/agent/requirements.txt%{ for library, version in python_libraries }, "${library}==${version}"%{ endfor }]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, agent.service]
+  - [curl, -fsS, --retry, "30", --retry-delay, "2", --retry-connrefused, -o, /dev/null, "http://127.0.0.1:${web_port}/"]
