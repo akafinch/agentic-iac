@@ -12,3 +12,6 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]  # tests/agent imports the runner as agent.runner, the way app.py starts it

@@ -76,7 +76,8 @@ terraform {
 """)
 
 # What the forge showed just before the run's last push or atlantis comment: the newest comment ID and
-# the head commit's status IDs. IDs, not clocks, tell what came after: the two VMs' clocks differ.
+# the head commit's statuses, each known by its commit and its number there (look). IDs, not clocks,
+# tell what came after: the two VMs' clocks differ.
 Seen = namedtuple("Seen", "comment statuses")
 
 
@@ -168,10 +169,15 @@ def shard_files():
 
 def look():
     """The change as the forge shows it now: the pull request, the latest status per context on its
-    current head commit, and every comment on it."""
+    current head commit, and every comment on it. A status's ID is its number on its own commit,
+    counted from 1, and the pipeline posts the same statuses on every commit, so each status is
+    known by its commit and its number together (its "key").
+    https://github.com/go-gitea/gitea/blob/v28.2.0/services/convert/status.go,
+    https://github.com/go-gitea/gitea/blob/v28.2.0/models/git/commit_status.go (as-of 2026-11-04)"""
     pull = forge("GET", f"/pulls/{RUN.number}")
-    combined = forge("GET", f"/commits/{pull['head']['sha']}/status")
-    statuses = {status["context"]: status for status in combined.get("statuses") or []}
+    sha = pull["head"]["sha"]
+    combined = forge("GET", f"/commits/{sha}/status")
+    statuses = {status["context"]: status | {"key": (sha, status["id"])} for status in combined.get("statuses") or []}
     return pull, statuses, forge("GET", f"/issues/{RUN.number}/comments")
 
 
@@ -179,13 +185,13 @@ def snapshot():
     if RUN.number is None:
         return Seen(0, frozenset())
     _, statuses, comments = look()
-    return Seen(max((c["id"] for c in comments), default=0), frozenset(s["id"] for s in statuses.values()))
+    return Seen(max((c["id"] for c in comments), default=0), frozenset(s["key"] for s in statuses.values()))
 
 
 def fresh(statuses, context, seen):
     """A context's latest status on the head commit, if it came after the last push or comment."""
     status = statuses.get(context)
-    return status if status and status["id"] not in seen.statuses else None
+    return status if status and status["key"] not in seen.statuses else None
 
 
 def answers(comments, seen):

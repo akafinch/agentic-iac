@@ -73,6 +73,9 @@ WORK_PATH = /var/lib/gitea
 [server]
 HTTP_PORT = $forge_port
 ROOT_URL = http://$public_ip:$forge_port/
+; Every link uses ROOT_URL. By default Gitea builds them from each request's Host, so the agent,
+; which calls the forge at its private address, would get private links.
+PUBLIC_URL_DETECTION = never
 
 [database]
 ; One file under WORK_PATH. The release binary's SQLite driver is pure Go.

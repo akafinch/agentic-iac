@@ -8,6 +8,7 @@ config of yours reaches it.
 """
 
 import base64
+import configparser
 import functools
 import gzip
 import hashlib
@@ -375,6 +376,21 @@ def test_nothing_that_ships_holds_a_secret():
             if CREDENTIAL_NAME.search(key) and re.search(r"[0-9]", value) and re.search(r"[A-Za-z]", value):
                 problems.append(f"{name}: a literal credential for {key}")
     assert not problems, "\n".join(problems)
+
+
+# --- The forge's links ---------------------------------------------------------------------------
+
+
+def test_every_forge_link_uses_its_public_address():
+    """The forge's config, as first boot writes it, makes every link ROOT_URL, the public address
+    first boot discovers. By default Gitea v28.2.0 builds links from each request's Host header, so
+    the agent, which calls the forge at its private address, would get private links."""
+    script = (REPO / "platform" / "setup-platform.sh").read_text()
+    body = re.search(r"cat > /etc/gitea/app\.ini <<EOF\n(.*?)\nEOF\n", script, re.S).group(1)
+    config = configparser.ConfigParser(comment_prefixes=(";",), interpolation=None)
+    config.read_string("[top]\n" + body)  # the keys before the first section
+    assert config["server"]["ROOT_URL"] == "http://$public_ip:$forge_port/"
+    assert config["server"]["PUBLIC_URL_DETECTION"] == "never"
 
 
 # --- Your ranges, from the firewall to policy -------------------------------------------------------
