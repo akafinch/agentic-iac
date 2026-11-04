@@ -14,7 +14,7 @@ locals {
   }
 
   platform_user_data = templatefile("${local.repo_root}/platform/platform.yaml.tftpl", merge(local.shared_vars, {
-    reader_cidr             = var.reader_cidr
+    reader_cidrs            = var.reader_cidrs
     vpc_subnet              = local.vpc_subnet
     forge_reader_user       = local.forge_users.reader
     forge_reader_password   = random_password.forge["reader"].result

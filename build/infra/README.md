@@ -12,7 +12,7 @@ Its own state stays local. The repository README walks the whole journey, teardo
   user. The tokens the module mints can't exceed its scopes, and only an unrestricted user with
   `account:read_write` can set the locks.
 - An Akamai Inference API key, made in Cloud Manager. No Terraform resource can make one.
-- `terraform.tfvars` from `terraform.tfvars.example`: `reader_cidr`, `authorized_keys`,
+- `terraform.tfvars` from `terraform.tfvars.example`: `reader_cidrs`, `authorized_keys`,
   `inference_api_key`. Region (`us-iad-2`), plan sizes, `token_lifetime_days` (30) and `name` have
   defaults. `adp.auto.tfvars.json` holds the pinned versions, image, endpoint type and model.
 

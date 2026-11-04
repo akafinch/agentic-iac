@@ -58,7 +58,7 @@ write_files:
       AWS_SECRET_ACCESS_KEY=${state_secret_key}
       STATE_BUCKET=${state_bucket}
       STATE_ENDPOINT=${state_endpoint}
-      ADMIN_RANGE=${reader_cidr}
+      ADMIN_RANGE=${join(",", reader_cidrs)}
 
   # The forge's identities and their passwords, which only root reads, to create them.
   - path: /etc/agentic-iac/forge-users.env

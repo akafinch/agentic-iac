@@ -1,5 +1,5 @@
 # Policy set "block": a firewall must not admit SSH (TCP 22) from outside the admin range, the
-# reader's own source range. The set has no owners, and Atlantis has no top-level policy owners, so
+# reader's own source ranges. The set has no owners, and Atlantis has no top-level policy owners, so
 # nobody can approve a failure: the plan stands, the change keeps its shard's lock, and the agent
 # revises. Atlantis runs it on the saved plan's JSON (tofu show -json) as Conftest sees it:
 #   conftest test -p /opt/agentic-iac/gate/policy/block <plan>.json
@@ -14,10 +14,15 @@ package main
 # Atlantis passes its environment to Conftest, which hands it to the policy as opa.runtime().env.
 # https://github.com/runatlantis/atlantis/blob/v0.49.0/server/core/runtime/models/exec.go,
 # https://github.com/open-policy-agent/conftest/blob/v0.71.1/policy/engine.go
-admin_range := trim_space(object.get(opa.runtime().env, "ADMIN_RANGE", ""))
+# ADMIN_RANGE holds the reader's ranges, comma-separated, as platform/platform.yaml.tftpl writes them.
+admin_ranges := [r |
+	some part in split(object.get(opa.runtime().env, "ADMIN_RANGE", ""), ",")
+	r := trim_space(part)
+	r != ""
+]
 
 # Every reason names the admin range. With none set, no source may have SSH.
-outside := sprintf("outside the admin range %s", [admin_range]) if admin_range != ""
+outside := sprintf("outside the admin range %s", [concat(", ", admin_ranges)]) if count(admin_ranges) > 0
 
 else := "and the admin range is not set (ADMIN_RANGE is empty), so no source may have SSH"
 
@@ -98,7 +103,7 @@ cidrs(value) := value if is_array(value)
 else := []
 
 in_admin_range(cidr) if {
-	admin_range != ""
+	some admin_range in admin_ranges
 	net.cidr_contains(admin_range, cidr)
 }
 

@@ -33,7 +33,7 @@ interface and the agents, whose model Akamai Inference serves.
 
 ```bash
 cd build/infra
-cp terraform.tfvars.example terraform.tfvars   # your range (reader_cidr), SSH keys, inference key
+cp terraform.tfvars.example terraform.tfvars   # your ranges (reader_cidrs), SSH keys, inference key
 export LINODE_TOKEN=...                         # the deploy token
 tofu init && tofu apply
 ```
@@ -68,15 +68,13 @@ tofu output -raw reader_forge_password
 5. Send two requests with "a new shard": each has its own state and lock, so both plan and apply in
    parallel.
 
-Verified against Akamai Inference (beta) with GLM-5.3 as of 2026-10-29; confirm model availability
-and behaviour in your own account. Verified with CrewAI 1.15.33 against Akamai Inference (beta) and
-GLM-5.3 as of 2026-10-29; confirm model availability and behaviour in your own account. The demo was
-verified on an Akamai Inference beta account as of 2026-10-29. Beta access and limits vary by
-account; confirm your own in Cloud Manager.
+The agent's setup, CrewAI 1.15.33 with GLM-5.3, was verified against Akamai Inference (beta) as of
+2026-10-29; confirm model availability and behaviour in your own account. Beta access and limits
+vary by account; confirm yours in Cloud Manager.
 
-**Footgun.** Re-applying after you edit anything rendered into a VM's user data, a policy included,
-replaces that VM. On the platform VM that wipes the forge, and the next plan would destroy what the
-agents built. Run the shard teardown first.
+**Footgun.** Re-applying after you edit anything rendered into a VM's user data, a policy or
+`reader_cidrs` included, replaces that VM. On the platform VM that wipes the forge, and the next
+plan would destroy what the agents built. Run the shard teardown first.
 
 ## Tear down
 

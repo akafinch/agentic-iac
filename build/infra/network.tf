@@ -24,7 +24,7 @@ resource "linode_vpc_subnet" "this" {
 }
 
 # One Cloud Firewall on both VMs, attached as each is created. Inbound traffic is dropped except
-# SSH, the forge and the web interface from your range, and the forge from the subnet: Cloud
+# SSH, the forge and the web interface from your ranges, and the forge from the subnet: Cloud
 # Firewall filters VPC traffic too
 # (https://techdocs.akamai.com/cloud-computing/docs/vpc, as-of 2026-10-30). Atlantis's port is
 # never opened; the forge reaches it on loopback.
@@ -36,7 +36,7 @@ resource "linode_firewall" "this" {
     action   = "ACCEPT"
     protocol = "TCP"
     ports    = "22"
-    ipv4     = [var.reader_cidr]
+    ipv4     = var.reader_cidrs
   }
 
   inbound {
@@ -44,7 +44,7 @@ resource "linode_firewall" "this" {
     action   = "ACCEPT"
     protocol = "TCP"
     ports    = tostring(local.forge_port)
-    ipv4     = [var.reader_cidr]
+    ipv4     = var.reader_cidrs
   }
 
   inbound {
@@ -52,7 +52,7 @@ resource "linode_firewall" "this" {
     action   = "ACCEPT"
     protocol = "TCP"
     ports    = tostring(local.web_port)
-    ipv4     = [var.reader_cidr]
+    ipv4     = var.reader_cidrs
   }
 
   inbound {

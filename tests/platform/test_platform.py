@@ -26,6 +26,9 @@ REPO = Path(__file__).resolve().parents[2]
 # https://techdocs.akamai.com/linode-api/reference/post-linode-instance (user_data, as-of 2026-11-02)
 USER_DATA_LIMIT = 65535
 
+# Two of your ranges, as terraform.tfvars lists them (documentation ranges, RFC 5737).
+READER_CIDRS = ["203.0.113.7/32", "198.51.100.0/24"]
+
 
 def tofu(workdir, home, *args):
     """Run tofu with nothing from this environment but PATH: a temporary HOME and a dummy token."""
@@ -56,16 +59,16 @@ def checkout(tmp_path):
 
 
 def test_the_plan_is_the_inventory(tmp_path):
-    """Two VMs, a firewall, a VPC and subnet, the bucket and its key, two locks, and two tokens that
-    expire, neither with account or Object Storage scope and the agent's read-only; from Akamai's
-    provider and two open-source ones only."""
+    """Two VMs, a firewall admitting each of your ranges, a VPC and subnet, the bucket and its key,
+    two locks, and two tokens that expire, neither with account or Object Storage scope and the
+    agent's read-only; from Akamai's provider and two open-source ones only."""
     module = checkout(tmp_path) / "build" / "infra"
     home = tmp_path / "home"
     home.mkdir()
     tofu(module, home, "init", "-input=false", "-no-color")
     tofu(
         module, home, "plan", "-input=false", "-no-color", "-out=tfplan",
-        "-var", "reader_cidr=203.0.113.7/32",
+        "-var", f"reader_cidrs={json.dumps(READER_CIDRS)}",
         "-var", 'authorized_keys=["ssh-ed25519 AAAA... you@example.com"]',
         "-var", "inference_api_key=placeholder",
     )
@@ -83,6 +86,10 @@ def test_the_plan_is_the_inventory(tmp_path):
         "linode_lock": 2,
         "linode_token": 2,
     }
+
+    firewall = next(change["change"]["after"] for change in managed if change["type"] == "linode_firewall")
+    sources = {rule["label"]: rule["ipv4"] for rule in firewall["inbound"]}
+    assert [sources[f"{name}-from-reader"] for name in ("ssh", "forge", "web")] == [READER_CIDRS] * 3, sources
 
     tokens = {change["name"]: change["change"] for change in managed if change["type"] == "linode_token"}
     assert set(tokens) == {"pipeline", "agent"}
@@ -141,7 +148,7 @@ def template_variables(repo_root):
         "agent_vpc_ip": "10.0.0.11",
         "vpc_subnet": "10.0.0.0/24",
         "forge_url": "http://10.0.0.10:3000",
-        "reader_cidr": "203.0.113.7/32",
+        "reader_cidrs": READER_CIDRS,
         "forge_reader_user": "reader",
         "forge_agent_user": "agent",
         "forge_pipeline_user": "pipeline",
@@ -251,3 +258,14 @@ def test_nothing_that_ships_holds_a_secret():
             if CREDENTIAL_NAME.search(key) and re.search(r"[0-9]", value) and re.search(r"[A-Za-z]", value):
                 problems.append(f"{name}: a literal credential for {key}")
     assert not problems, "\n".join(problems)
+
+
+# --- Your ranges, from the firewall to policy -------------------------------------------------------
+
+
+def test_policy_gets_each_of_your_ranges(tmp_path):
+    """Atlantis's environment names every one of your ranges as the admin range, comma-separated,
+    the form the block policy splits."""
+    _, files = unpack(render(tmp_path, checkout(tmp_path))["platform"])
+    _, env = files["/etc/agentic-iac/atlantis.env"]
+    assert f"ADMIN_RANGE={','.join(READER_CIDRS)}" in env.splitlines()

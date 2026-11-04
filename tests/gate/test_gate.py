@@ -129,6 +129,16 @@ def test_world_open_ssh_is_blocked_naming_the_admin_range():
     assert policy("route", "world-open-ssh.json").returncode == 0
 
 
+def test_ssh_passes_from_any_of_several_admin_ranges_and_reasons_name_them_all():
+    # Comma-separated, as the platform writes ADMIN_RANGE. The addition's SSH source, 203.0.113.7/32,
+    # lies in the second range only.
+    ranges = "198.51.100.0/24,203.0.113.0/24"
+    assert policy("block", "addition.json", admin_range=ranges).returncode == 0
+    blocked = policy("block", "world-open-ssh.json", admin_range=ranges)
+    assert blocked.returncode != 0
+    assert "from 0.0.0.0/0, outside the admin range 198.51.100.0/24, 203.0.113.0/24." in blocked.stdout
+
+
 def test_a_destroy_fails_only_route():
     assert policy("block", "destroy.json").returncode == 0
     routed = policy("route", "destroy.json")

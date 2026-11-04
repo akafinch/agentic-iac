@@ -1,13 +1,13 @@
 # ── Yours to set, in terraform.tfvars (git ignores it; start from terraform.tfvars.example) ─────
 
-variable "reader_cidr" {
-  description = "Your source range in IPv4 CIDR form, e.g. 203.0.113.7/32. The firewall admits SSH, the forge and the web interface from it alone, and policy names it as the admin range."
-  type        = string
+variable "reader_cidrs" {
+  description = "Your source ranges, one or more in IPv4 CIDR form, e.g. [\"203.0.113.7/32\"]. The firewall admits SSH, the forge and the web interface from them alone, and policy names them as the admin range."
+  type        = list(string)
 
   validation {
     # Cloud Firewall takes addresses in IP/mask form only.
-    condition     = can(cidrnetmask(var.reader_cidr))
-    error_message = "reader_cidr must be an IPv4 range in CIDR form, such as 203.0.113.7/32."
+    condition     = length(var.reader_cidrs) > 0 && alltrue([for cidr in var.reader_cidrs : can(cidrnetmask(cidr))])
+    error_message = "reader_cidrs must list one or more IPv4 ranges in CIDR form, such as [\"203.0.113.7/32\"]."
   }
 }
 
