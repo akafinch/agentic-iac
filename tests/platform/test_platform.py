@@ -8,12 +8,16 @@ config of yours reaches it.
 """
 
 import base64
+import functools
 import gzip
+import hashlib
+import http.server
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -22,9 +26,10 @@ import yaml  # PyYAML, which CrewAI depends on
 
 REPO = Path(__file__).resolve().parents[2]
 
-# User data can't exceed 65,535 bytes once base64-encoded:
-# https://techdocs.akamai.com/linode-api/reference/post-linode-instance (user_data, as-of 2026-11-02)
-USER_DATA_LIMIT = 65535
+# The API refuses user data over 16,384 bytes once decoded, on create: "decoded user_data must not
+# exceed 16384 bytes" (as-of 2026-11-04). The API reference's figure, 65,535, isn't the limit it
+# applies.
+USER_DATA_LIMIT = 16384
 
 # Two of your ranges, as terraform.tfvars lists them (documentation ranges, RFC 5737).
 READER_CIDRS = ["203.0.113.7/32", "198.51.100.0/24"]
@@ -55,14 +60,30 @@ def checkout(tmp_path):
     return root
 
 
+def files_each_vm_runs(root):
+    """What each VM fetches from the files bucket, by path in the checkout, with its mode: the gate,
+    first boot's scripts and the shard teardown on the platform; the service, without __pycache__/,
+    and the OpenTofu install on the agent VM."""
+    def under(part):
+        return [path.relative_to(root).as_posix() for path in sorted((root / part).rglob("*"))
+                if path.is_file() and "__pycache__" not in path.parts]
+    platform = {name: "0755" if name.endswith(".sh") else "0644" for name in under("gate")}
+    platform |= {"platform/install-tofu.sh": "0755", "platform/setup-platform.sh": "0755",
+                 "platform/teardown-shards.sh": "0700"}
+    agent = {name: "0644" for name in under("agent")} | {"platform/install-tofu.sh": "0755"}
+    return {"platform": platform, "agent": agent}
+
+
 # --- Criterion 1: the plan is the inventory ---------------------------------------------------------
 
 
 def test_the_plan_is_the_inventory(tmp_path):
-    """Two VMs, a firewall admitting each of your ranges, a VPC and subnet, the bucket and its key,
-    two locks, and two tokens that expire, neither with account or Object Storage scope and the
-    agent's read-only; from Akamai's provider and two open-source ones only."""
-    module = checkout(tmp_path) / "build" / "infra"
+    """Two VMs, a firewall admitting each of your ranges, a VPC and subnet, the state bucket and its
+    key, the files bucket with an object per file and three keys, two locks, and two tokens that
+    expire, neither with account or Object Storage scope and the agent's read-only; from Akamai's
+    provider and two open-source ones only."""
+    root = checkout(tmp_path)
+    module = root / "build" / "infra"
     home = tmp_path / "home"
     home.mkdir()
     tofu(module, home, "init", "-input=false", "-no-color")
@@ -75,16 +96,43 @@ def test_the_plan_is_the_inventory(tmp_path):
     plan = json.loads(tofu(module, home, "show", "-json", "tfplan"))
 
     managed = [change for change in plan["resource_changes"] if change["mode"] == "managed"]
+    files = files_each_vm_runs(root)
     assert all(change["change"]["actions"] == ["create"] for change in managed)
     assert Counter(change["type"] for change in managed if change["type"].startswith("linode_")) == {
         "linode_instance": 2,
         "linode_firewall": 1,
         "linode_vpc": 1,
         "linode_vpc_subnet": 1,
-        "linode_object_storage_bucket": 1,
-        "linode_object_storage_key": 1,
+        "linode_object_storage_bucket": 2,
+        "linode_object_storage_key": 4,
+        "linode_object_storage_object": len(files["platform"] | files["agent"]),
         "linode_lock": 2,
         "linode_token": 2,
+    }
+
+    # Each file a VM runs is an object keyed by its path, there before either VM. The module writes
+    # the files bucket, each VM reads it with a key of its own, and only the pipeline's key reaches
+    # the state bucket.
+    objects = {change["change"]["after"]["key"]: change["change"]["after"]["source"]
+               for change in managed if change["type"] == "linode_object_storage_object"}
+    assert objects.keys() == files["platform"].keys() | files["agent"].keys()
+    assert all(source.endswith(f"/{key}") for key, source in objects.items())
+    config = {resource["address"]: resource for resource in plan["configuration"]["root_module"]["resources"]}
+    assert all("linode_object_storage_object.file" in config[f"linode_instance.{vm}"]["depends_on"]
+               for vm in ("platform", "agent"))
+    keys = {
+        change["address"]: (
+            [access["permissions"] for access in change["change"]["after"]["bucket_access"]],
+            {ref for ref in config[change["address"].split("[")[0]]["expressions"]["bucket_access"][0]
+             ["bucket_name"]["references"] if ref.count(".") == 1},
+        )
+        for change in managed if change["type"] == "linode_object_storage_key"
+    }
+    assert keys == {
+        "linode_object_storage_key.state": (["read_write"], {"linode_object_storage_bucket.state"}),
+        "linode_object_storage_key.files_writer": (["read_write"], {"linode_object_storage_bucket.files"}),
+        'linode_object_storage_key.files_reader["platform"]': (["read_only"], {"linode_object_storage_bucket.files"}),
+        'linode_object_storage_key.files_reader["agent"]': (["read_only"], {"linode_object_storage_bucket.files"}),
     }
 
     firewall = next(change["change"]["after"] for change in managed if change["type"] == "linode_firewall")
@@ -128,9 +176,15 @@ SECRETS = {
     "webhook_secret": sentinel("webhooksecret", 32),  # random_password.webhook_secret: 32
     "state_access_key": sentinel("stateaccesskey", 20),  # Object Storage keys: 20 and 40
     "state_secret_key": sentinel("statesecretkey", 40),
+    "platform_files_access_key": sentinel("platformfilesaccess", 20),
+    "platform_files_secret_key": sentinel("platformfilessecret", 40),
+    "agent_files_access_key": sentinel("agentfilesaccess", 20),
+    "agent_files_secret_key": sentinel("agentfilessecret", 40),
     "inference_api_key": sentinel("inferencekey", 200),  # generous: no published length
 }
-AGENT_SECRETS = {"inference_api_key", "agent_token", "forge_agent_password"}
+AGENT_SECRETS = {
+    "inference_api_key", "agent_token", "forge_agent_password", "agent_files_access_key", "agent_files_secret_key",
+}
 
 
 def secrets_in(text):
@@ -154,6 +208,9 @@ def template_variables(repo_root):
         "forge_pipeline_user": "pipeline",
         "state_bucket": "agentic-iac-state-a1b2c3",  # the name, then random_id's 6 hex characters
         "state_endpoint": "https://us-iad-10.linodeobjects.com",
+        "files_bucket": "agentic-iac-files-a1b2c3",
+        "files_endpoint": "https://us-iad-10.linodeobjects.com",
+        **{f"{vm}_files": files for vm, files in files_each_vm_runs(repo_root).items()},
         "linode_provider_version": "4.9.0",  # build/infra/variables.tf
         **{
             name: pinned[name]
@@ -198,17 +255,17 @@ def unpack(rendering):
 
 
 def test_each_vm_holds_only_its_own_secrets_within_the_user_data_cap(tmp_path):
-    """The agent VM's user data holds only the inference key, its read-only token and its forge
-    password; the platform's holds neither of the first two. Each fits the user-data cap: the
-    module's own size check can't fire at plan, because the real renderings interpolate tokens and
-    keys minted at apply, so this checks sentinel renderings at least as large."""
+    """The agent VM's user data holds only the inference key, its read-only token, its read-only key
+    to the files bucket and its forge password; the platform's holds none of the first three. Each
+    fits the user-data cap: the module's own size check can't fire at plan, because the real
+    renderings interpolate tokens and keys minted at apply, so this checks sentinel renderings at
+    least as large."""
     renderings = render(tmp_path, checkout(tmp_path))
     found = {}
     for name, rendering in renderings.items():
-        size = len(base64.b64encode(rendering.encode()))
-        assert size <= USER_DATA_LIMIT, f"{name}: {size} bytes base64-encoded"
+        size = len(rendering.encode())
+        assert size <= USER_DATA_LIMIT, f"{name}: {size} bytes decoded"
         config, files = unpack(rendering)
-        assert not [path for path in files if "__pycache__" in path], name
         # Secrets sit only in 0400 files, each read by one service or by root, never on a command line.
         for path, (permissions, text) in files.items():
             if secrets_in(text):
@@ -216,7 +273,67 @@ def test_each_vm_holds_only_its_own_secrets_within_the_user_data_cap(tmp_path):
         assert not secrets_in(json.dumps({key: value for key, value in config.items() if key != "write_files"}))
         found[name] = secrets_in(rendering + "".join(text for _, text in files.values()))
     assert found["agent"] == AGENT_SECRETS
-    assert not found["platform"] & {"inference_api_key", "agent_token"}
+    assert {"platform_files_access_key", "platform_files_secret_key"} <= found["platform"]
+    assert not found["platform"] & {"inference_api_key", "agent_token", "agent_files_access_key", "agent_files_secret_key"}
+
+
+def test_each_vm_lists_only_its_own_files_each_with_its_sha256(tmp_path):
+    """Each VM's manifest lists exactly the files it runs, __pycache__/ skipped, each with its mode
+    and the SHA-256 of your checkout's copy, which first boot checks before installing any."""
+    root = checkout(tmp_path)
+    renderings = render(tmp_path, root)
+    for name, files in files_each_vm_runs(root).items():
+        _, written = unpack(renderings[name])
+        _, manifest = written["/etc/agentic-iac/files.manifest"]
+        assert manifest.splitlines() == [
+            f"{mode} {hashlib.sha256((root / path).read_bytes()).hexdigest()} {path}"
+            for path, mode in sorted(files.items())
+        ], name
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+
+def test_first_boot_fetch_installs_the_files_only_when_every_sha256_matches(tmp_path):
+    """platform/fetch-files.sh against a local stand-in for the files bucket, which serves the files
+    and ignores the request's signature, which only the real bucket checks: every file lands with its
+    mode once all match; when one doesn't, the fetch fails and nothing lands."""
+    served = tmp_path / "served"
+    files = {"agent/static/index.html": ("0644", b"<p>page</p>\n"), "gate/init-shard.sh": ("0755", b"#!/bin/sh\n")}
+    for path, (_, body) in files.items():
+        (served / "files-bucket" / path).parent.mkdir(parents=True, exist_ok=True)
+        (served / "files-bucket" / path).write_bytes(body)
+    manifest = tmp_path / "files.manifest"
+    manifest.write_text("".join(f"{mode} {hashlib.sha256(body).hexdigest()} {path}\n" for path, (mode, body) in files.items()))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env_file = tmp_path / "files.env"
+    env_file.write_text(f"FILES_ENDPOINT=http://127.0.0.1:{server.server_port}\nFILES_BUCKET=files-bucket\n"
+                        "FILES_ACCESS_KEY=placeholder\nFILES_SECRET_KEY=placeholder\n")
+    dest = tmp_path / "opt"
+
+    def fetch():
+        # Nothing of this environment's but PATH, so no curlrc or proxy setting of yours applies.
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+        command = [str(REPO / "platform" / "fetch-files.sh"), str(env_file), str(manifest), str(dest)]
+        return subprocess.run(command, env=env, capture_output=True, text=True)
+
+    try:
+        result = fetch()
+        assert result.returncode == 0, result.stdout + result.stderr
+        for path, (mode, body) in files.items():
+            assert (dest / path).read_bytes() == body
+            assert (dest / path).stat().st_mode & 0o777 == int(mode, 8), path
+        shutil.rmtree(dest)
+        (served / "files-bucket" / "gate" / "init-shard.sh").write_bytes(b"#!/bin/sh\necho changed\n")
+        result = fetch()
+        assert result.returncode != 0
+        assert "FAILED" in result.stdout + result.stderr
+        assert not dest.exists()
+    finally:
+        server.shutdown()
 
 
 # What may not ship. The two key patterns are assembled, so this file, which the scan reads too, never

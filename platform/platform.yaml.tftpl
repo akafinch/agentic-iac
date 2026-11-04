@@ -15,25 +15,34 @@ packages:
   - git    # Atlantis clones each change
   - unzip  # Atlantis ships as a zip, and Canonical's Ubuntu 24.04 image has no unzip
 
-# Every file lands root-owned, since the service users don't exist until runcmd. Embedded files are
-# gzipped (gz+b64): user data can't exceed 65,535 bytes base64-encoded. A change to any of them
-# changes the user data, which replaces the VM.
+# Every file lands root-owned, since the service users don't exist until runcmd. The files this VM
+# runs come from the files bucket, since user data can't hold them: the API refuses more than 16,384
+# bytes of it, decoded. The manifest lists each one's SHA-256, so a change to any of them changes
+# the user data, which replaces the VM.
 # https://github.com/canonical/cloud-init/blob/26.2/cloudinit/config/cc_write_files.py (as-of 2026-11-02)
 write_files:
-  # The gate, verbatim. Atlantis reads it and can't change it, and its scripts are executable: the
-  # plan workflow runs init-shard.sh by path.
-%{ for name in fileset("${repo_root}/gate", "**") ~}
-  - path: /opt/agentic-iac/gate/${name}
-    permissions: "${endswith(name, ".sh") ? "0755" : "0644"}"
+  # First boot's fetch, the one script user data carries, gzipped (gz+b64).
+  - path: /opt/agentic-iac/platform/fetch-files.sh
+    permissions: "0755"
     encoding: gz+b64
-    content: ${base64gzip(file("${repo_root}/gate/${name}"))}
-%{ endfor ~}
-  # First boot's scripts, and the shard teardown, which only root may run.
-%{ for name in ["install-tofu.sh", "setup-platform.sh", "teardown-shards.sh"] ~}
-  - path: /opt/agentic-iac/platform/${name}
-    permissions: "${name == "teardown-shards.sh" ? "0700" : "0755"}"
-    encoding: gz+b64
-    content: ${base64gzip(file("${repo_root}/platform/${name}"))}
+    content: ${base64gzip(file("${repo_root}/platform/fetch-files.sh"))}
+
+  # The files bucket and this VM's own read-only key to it, which only root reads, to fetch.
+  - path: /etc/agentic-iac/files.env
+    permissions: "0400"
+    content: |
+      FILES_ENDPOINT=${files_endpoint}
+      FILES_BUCKET=${files_bucket}
+      FILES_ACCESS_KEY=${platform_files_access_key}
+      FILES_SECRET_KEY=${platform_files_secret_key}
+
+  # What this VM runs from your checkout, by mode, SHA-256 and path (build/infra/compute.tf): the
+  # gate, first boot's scripts and the shard teardown.
+  - path: /etc/agentic-iac/files.manifest
+    permissions: "0644"
+    content: |
+%{ for name, mode in platform_files ~}
+      ${mode} ${filesha256("${repo_root}/${name}")} ${name}
 %{ endfor ~}
 
   # Atlantis's settings and secrets, for the atlantis user alone. Its environment outranks
@@ -112,6 +121,8 @@ write_files:
 # One /bin/sh script, a line per item, run once as root after the packages.
 runcmd:
   - set -e  # stop at the first failure, so that `cloud-init status` reports it
+  # First, every file this VM runs, each checked against its SHA-256 in the manifest.
+  - [/opt/agentic-iac/platform/fetch-files.sh, /etc/agentic-iac/files.env, /etc/agentic-iac/files.manifest, /opt/agentic-iac]
   # Each service gets its own user, with a home, owning only its own files.
   - [useradd, --system, --create-home, --home-dir, /var/lib/gitea, --shell, /usr/sbin/nologin, gitea]
   - [useradd, --system, --create-home, --home-dir, /var/lib/atlantis, --shell, /usr/sbin/nologin, atlantis]

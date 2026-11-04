@@ -25,7 +25,7 @@ variable "inference_api_key" {
 # ── Per-environment footprint ─────────────────────────────────────────────────────────────────
 
 variable "region" {
-  description = "Region for both VMs, the VPC and the state bucket. us-iad-2 offers all of them, E3 Object Storage included."
+  description = "Region for both VMs, the VPC and both buckets. us-iad-2 offers all of them, E3 Object Storage included."
   type        = string
   default     = "us-iad-2"
 }
@@ -68,7 +68,7 @@ variable "image" {
 }
 
 variable "state_endpoint_type" {
-  description = "Object Storage endpoint type for the state bucket."
+  description = "Object Storage endpoint type for both buckets: the state and the files each VM runs."
   type        = string
 }
 

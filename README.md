@@ -38,9 +38,9 @@ export LINODE_TOKEN=...                         # the deploy token
 tofu init && tofu apply
 ```
 
-The plan reads as the inventory: two VMs, a firewall, a private network, the state bucket and its
-key, two minted tokens that expire, and a delete lock on each VM. The delete locks use an
-early-access API, which may be unavailable to some accounts or regions.
+The plan reads as the inventory: two VMs, a firewall, a private network, two buckets (the state, and
+the files each VM runs) and their keys, two minted tokens that expire, and a delete lock on each
+VM. The delete locks use an early-access API, which may be unavailable to some accounts or regions.
 
 First boot takes several minutes after the apply. An operator can watch it over SSH:
 `ssh root@$(tofu output -raw platform_ip) cloud-init status --wait`, then the same with `agent_ip`.
@@ -72,9 +72,9 @@ The agent's setup, CrewAI 1.15.33 with GLM-5.3, was verified against Akamai Infe
 2026-10-29; confirm model availability and behaviour in your own account. Beta access and limits
 vary by account; confirm yours in Cloud Manager.
 
-**Footgun.** Re-applying after you edit anything rendered into a VM's user data, a policy or
-`reader_cidrs` included, replaces that VM. On the platform VM that wipes the forge, and the next
-plan would destroy what the agents built. Run the shard teardown first.
+**Footgun.** Re-applying after you edit any file a VM runs, a policy included, or anything rendered
+into its user data, `reader_cidrs` included, replaces that VM. On the platform VM that wipes the
+forge, and the next plan would destroy what the agents built. Run the shard teardown first.
 
 ## Tear down
 
@@ -85,8 +85,8 @@ From `build/infra/`:
    ```bash
    ssh root@$(tofu output -raw platform_ip) /opt/agentic-iac/platform/teardown-shards.sh
    ```
-2. **The platform:** `tofu destroy`. It lifts each delete lock before the VM it guards, and revokes
-   the tokens and keys it minted.
+2. **The platform:** `tofu destroy`. It lifts each delete lock before the VM it guards, deletes both
+   buckets, and revokes the tokens and keys it minted.
 3. **Object Storage:** cancel it in Cloud Manager, unless other buckets need it. Cancelling deletes
    any buckets left ([docs](https://techdocs.akamai.com/cloud-computing/docs/cancel-object-storage)).
 4. **Your two credentials:** revoke the deploy token
@@ -97,5 +97,6 @@ From `build/infra/`:
 ## Tests
 
 `uv run pytest` plans the module and renders both VMs' user data, but never applies them. It also
-runs the gate's fixtures through the real code check and policies. It needs OpenTofu 1.13.2 and
+runs first boot's fetch against a local stand-in for the files bucket, and the gate's fixtures
+through the real code check and policies. It needs OpenTofu 1.13.2 and
 Conftest 0.71.1 on PATH. The providers download from registry.opentofu.org.

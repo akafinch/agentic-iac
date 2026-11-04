@@ -11,26 +11,35 @@ package_update: true
 packages:
   - python3-venv  # the service's environment, on Ubuntu 24.04's Python 3.12
 
-# Every file lands root-owned, since the agent user doesn't exist until runcmd. Embedded files are
-# gzipped (gz+b64): user data can't exceed 65,535 bytes base64-encoded. A change to any of them
-# changes the user data, which replaces the VM.
+# Every file lands root-owned, since the agent user doesn't exist until runcmd. The files this VM
+# runs come from the files bucket, since user data can't hold them: the API refuses more than 16,384
+# bytes of it, decoded. The manifest lists each one's SHA-256, so a change to any of them changes
+# the user data, which replaces the VM.
 # https://github.com/canonical/cloud-init/blob/26.2/cloudinit/config/cc_write_files.py (as-of 2026-11-02)
 write_files:
-  # The service, verbatim and read-only to it. __pycache__/ is skipped: Python rebuilds it, and its
-  # byte code is neither text that file() can read nor stable from one checkout to the next.
-  # https://docs.python.org/3.12/tutorial/modules.html#compiled-python-files (as-of 2026-10-30)
-%{ for name in fileset("${repo_root}/agent", "**") ~}
-%{ if !strcontains("/${name}", "/__pycache__/") ~}
-  - path: /opt/agentic-iac/agent/${name}
-    permissions: "0644"
-    encoding: gz+b64
-    content: ${base64gzip(file("${repo_root}/agent/${name}"))}
-%{ endif ~}
-%{ endfor ~}
-  - path: /opt/agentic-iac/platform/install-tofu.sh
+  # First boot's fetch, the one script user data carries, gzipped (gz+b64).
+  - path: /opt/agentic-iac/platform/fetch-files.sh
     permissions: "0755"
     encoding: gz+b64
-    content: ${base64gzip(file("${repo_root}/platform/install-tofu.sh"))}
+    content: ${base64gzip(file("${repo_root}/platform/fetch-files.sh"))}
+
+  # The files bucket and this VM's own read-only key to it, which only root reads, to fetch.
+  - path: /etc/agentic-iac/files.env
+    permissions: "0400"
+    content: |
+      FILES_ENDPOINT=${files_endpoint}
+      FILES_BUCKET=${files_bucket}
+      FILES_ACCESS_KEY=${agent_files_access_key}
+      FILES_SECRET_KEY=${agent_files_secret_key}
+
+  # What this VM runs from your checkout, by mode, SHA-256 and path (build/infra/compute.tf): the
+  # service, read-only to it, and the OpenTofu install.
+  - path: /etc/agentic-iac/files.manifest
+    permissions: "0644"
+    content: |
+%{ for name, mode in agent_files ~}
+      ${mode} ${filesha256("${repo_root}/${name}")} ${name}
+%{ endfor ~}
 
   # The service's settings and secrets, for the agent user alone. The forge is the platform VM, over
   # the private network; the platform creates reader/infra. CrewAI's telemetry and tracing stay off,
@@ -78,6 +87,8 @@ write_files:
 # One /bin/sh script, a line per item, run once as root after the packages.
 runcmd:
   - set -e  # stop at the first failure, so that `cloud-init status` reports it
+  # First, every file this VM runs, each checked against its SHA-256 in the manifest.
+  - [/opt/agentic-iac/platform/fetch-files.sh, /etc/agentic-iac/files.env, /etc/agentic-iac/files.manifest, /opt/agentic-iac]
   # The service's user, with a writable home, owning only its own settings and secrets.
   - [useradd, --system, --create-home, --home-dir, /var/lib/agent, --shell, /usr/sbin/nologin, agent]
   - [chown, "agent:agent", /etc/agentic-iac/agent.env]
