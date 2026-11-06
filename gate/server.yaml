@@ -8,14 +8,19 @@
 # https://github.com/runatlantis/atlantis/blob/v0.49.0/runatlantis.io/docs/checkout-strategy.md
 checkout-strategy: merge
 
-# Merge what was applied. The change's lock lasts from its plan until that merge, or its close.
+# Merge what was applied. The change's lock lasts from its plan until that merge, or an unlock.
 automerge: true
 
 # Judge every saved plan against the policy sets in repos.yaml before it may be applied.
 enable-policy-checks: true
 
-# No unlock and no cancel: no comment frees another change's lock.
-allow-commands: version,plan,apply,approve_policies
+# No cancel. Unlock stays: on Gitea, Atlantis drops a lock by itself only when its change merges,
+# so a stopping agent unlocks its own change before closing it, and you can free one you closed by
+# hand, since Atlantis runs an unlock even on a closed change. An unlock discards that change's
+# plan: to apply, it plans and is judged again.
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/server/events/event_parser.go,
+# https://github.com/runatlantis/atlantis/blob/v0.49.0/server/events/command_runner.go (as-of 2026-11-05)
+allow-commands: version,plan,apply,approve_policies,unlock
 
 # Comment flags (after "--") that would skip the lock or reshape what a plan covers; -var-file would
 # also read a file of the commenter's choosing on this machine. Matched by flag name.

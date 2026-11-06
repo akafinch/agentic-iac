@@ -1,4 +1,6 @@
 """One agent run: a plain-language request becomes a change the pipeline plans, checks and applies.
+First, one short model call sorts the request: a question gets an agent that can only read, and a
+request for several changes ends there, listed, so each can come back as a request of its own.
 
 agent/app.py starts this module as its own process for each request,
     python -m agent.runner <run-id> <shard>      (the request arrives on stdin)
@@ -91,6 +93,7 @@ class Run:
         self.shard = f"shards/{shard}"  # set at launch, never by the model
         self.branch = f"agent/{run_id}"
         self.work = Path.home() / "runs" / run_id  # this run's scratch space (app.py makes it)
+        self.kind = None  # what triage sorted the request as: question, change, several or unsorted
         self.number = None  # the change's pull request number, once opened
         self.url = None  # its html_url: the forge's public address, which the page links to
         self.files = {}  # file name -> content this run proposed, on top of the default branch
@@ -219,10 +222,23 @@ def over():
 
 
 def close(reason):
-    """End the run unmerged: close the change, saying why. Closing frees the shard's lock."""
+    """End the run unmerged: free the change's lock, then close the change, saying why. On Gitea,
+    Atlantis drops a lock by itself only when its change merges; closed unmerged, the change keeps
+    it until an unlock. A change holds the lock while its latest plan stands, and then the pipeline
+    answers the unlock (otherwise it stays silent), so the run waits for that answer: a change
+    queued behind this one finds the lock gone once this one is closed.
+    https://github.com/runatlantis/atlantis/blob/v0.49.0/server/events/event_parser.go,
+    https://github.com/runatlantis/atlantis/blob/v0.49.0/server/events/unlock_command_runner.go (as-of 2026-11-05)"""
     with LOCK:
         if RUN.ended:
             return over()
+        _, statuses, comments = look()
+        seen = Seen(max((c["id"] for c in comments), default=0), frozenset())
+        forge("POST", f"/issues/{RUN.number}/comments", {"body": "atlantis unlock"})
+        if statuses.get("atlantis/plan", {}).get("status") == "success":
+            waited = time.monotonic()
+            while not answers(look()[2], seen) and time.monotonic() - waited < RETRY_SECONDS:
+                time.sleep(POLL_SECONDS)
         body = f"Closing this change: {reason}. (Agent run {RUN.id}.)"
         forge("POST", f"/issues/{RUN.number}/comments", {"body": body})
         forge("PATCH", f"/pulls/{RUN.number}", {"state": "closed"})
@@ -438,6 +454,7 @@ def wait_for_pipeline() -> str:
     if RUN.number is None:
         return "There is no change yet: call propose_change first."
     started = time.monotonic()
+    replans = {}  # new plans asked for since each holder of the lock merged or closed
     while True:
         if time.monotonic() - started > WAIT_SECONDS:
             return close("it waited 15 minutes for the pipeline's verdict")
@@ -456,8 +473,18 @@ def wait_for_pipeline() -> str:
         if plan and plan["status"] in ("failure", "error") and new:
             holder = LOCKED_BY.search(said)
             if holder:  # another change's unapplied plan holds the shard
-                if not wait_behind(int(holder.group(1))):
+                number = int(holder.group(1))
+                tries = replans.get(number, 0)
+                if tries == 0 and not wait_behind(number):
                     return over()
+                if tries == 2:  # a change closed by hand, unmerged, keeps its lock
+                    return close(
+                        f"change #{number} is closed, yet still holds {RUN.shard}'s lock: comment "
+                        f"`atlantis unlock` on change #{number}, then ask again"
+                    )
+                if tries == 1:
+                    time.sleep(RETRY_SECONDS)  # a pipeline slow to drop the lock gets one more chance
+                replans[number] = tries + 1
                 ask_pipeline("atlantis plan")
                 started = time.monotonic()
                 continue
@@ -531,6 +558,71 @@ def request_apply() -> str:
         time.sleep(POLL_SECONDS)
 
 
+# --- Triage: what the request asks for, sorted before any agent starts ----------------------------
+# The code, not the model, sets what the agent may do with what triage says, and triage can only
+# narrow it or end the run: a question gets the read tools alone, so its run opens no change, and
+# several changes end the run before any code, so each gets its own plan, verdict and approval. A
+# reply triage can't read leaves the run a change, as it was before triage.
+
+TRIAGE = """You sort one request to an infrastructure agent before the agent starts. Reply with \
+JSON only: {"kind": "question" or "change" or "several", "changes": [...]}.
+- "question": the request only asks to be told something about the infrastructure or its code.
+- "change": it asks for one change, however many resources that takes.
+- "several": it asks for separate changes, one after another ("then", "after that", "also", a list).
+For "several", list each change in order, in the request's own words. Otherwise "changes" is []."""
+
+TOOLS = {
+    "question": [read_repo, read_cloud],
+    "change": [read_repo, read_cloud, validate, propose_change, wait_for_pipeline, request_apply],
+}
+TOOLS["unsorted"] = TOOLS["change"]
+
+SORTED = {
+    "question": "a question. The agent gets only read_repo and read_cloud, so this run can change nothing.",
+    "change": "one change. The agent gets its tools for proposing it.",
+    "unsorted": "no answer it could read, so the run goes ahead as one change.",
+    "several": "{count} changes, so the run ends here: one change per request.",
+}
+
+
+def triage(llm, request):
+    """Sort the request with one model call: ("question", []), ("change", []), ("several", the
+    changes it lists), or ("unsorted", []) when the call fails or its reply can't be read."""
+    try:
+        reply = str(llm.call([{"role": "system", "content": TRIAGE}, {"role": "user", "content": request}]))
+        found = json.loads(re.search(r"\{.*\}", reply, re.DOTALL).group())  # fenced or bare
+        kind, listed = found["kind"], found.get("changes", [])
+    except Exception:  # the call failed, or the reply holds no JSON object with a kind
+        return "unsorted", []
+    if not isinstance(listed, list):
+        listed = []
+    changes = [text.strip() for text in listed if isinstance(text, str) and text.strip()]
+    if kind == "question":
+        return "question", []
+    if kind == "several" and len(changes) > 1:
+        return "several", changes
+    if kind in ("change", "several"):  # "several" listing one change is one change
+        return "change", []
+    return "unsorted", []
+
+
+def sort(llm):
+    """Triage the request and show the result on the page. Returns the agent's tools, or None when
+    the run ends here, its changes listed, since it asked for several."""
+    RUN.kind, changes = triage(llm, RUN.request)
+    emit("triage", sorted_as=RUN.kind, text="Triage: " + SORTED[RUN.kind].format(count=len(changes)))
+    if RUN.kind != "several":
+        return TOOLS[RUN.kind]
+    listed = "\n".join(f"{number}. {change}" for number, change in enumerate(changes, 1))
+    emit(
+        "answer",
+        text=f"This request asks for {len(changes)} changes:\n{listed}\nSend them one at a time: each "
+        "gets its own plan, policy verdict and approval, and each builds on what the one before merged.",
+    )
+    emit("done", outcome="several changes", text="The agent proposed no change: one change per request.")
+    return None
+
+
 # --- The agent ------------------------------------------------------------------------------------
 
 RULES = """You hold no credential that can change anything. Your only write is propose_change: a \
@@ -554,6 +646,17 @@ pipeline refuses or blocks it, revise that file (at most two revisions) or stop 
 plan passed, or policy routed it to a human, call request_apply. To remove resources, propose their \
 file with empty content."""
 
+# A question's run: the same agent, holding the read tools alone.
+READ_ONLY = """You hold no credential that can change anything, and this run gives you no tool that \
+writes: you read the repository and, with a read-only token, the account."""
+
+QUESTION = """The reader asks: {request}
+
+This run answers a question and changes nothing. read_repo shows what your shard {shard}/ holds, \
+and read_cloud reads the account through the Linode API, at paths such as /linode/instances or \
+/networking/firewalls. Answer from what they return. If the reader asks for a change instead, say \
+that this run could not make one."""
+
 STOPPED = {
     None: "the agent stopped before the pipeline gave a verdict",
     "failed": "the agent stopped after the code check or the plan failed",
@@ -568,7 +671,9 @@ def count_model_call(source, event):
 
 
 def finish():
-    """A run that ends unmerged closes its change, saying why, and that frees the shard's lock."""
+    """A run that ends unmerged frees the shard's lock and closes its change, saying why."""
+    if RUN.number is None and RUN.kind == "question":
+        return {"outcome": "answered", "text": "The agent answered, and proposed no change."}
     if RUN.number is None:
         return {"outcome": "nothing proposed", "text": "The agent proposed no change."}
     pull = forge("GET", f"/pulls/{RUN.number}")
@@ -586,29 +691,39 @@ def main():
     EVENTS = os.fdopen(os.dup(1), "w", buffering=1)
     os.dup2(2, 1)
     RUN = Run(sys.argv[1], sys.argv[2], sys.stdin.read().strip())
-    crewai_event_bus.on(LLMCallStartedEvent)(count_model_call)  # the page counts model calls
+    crewai_event_bus.on(LLMCallStartedEvent)(count_model_call)  # the page counts model calls, triage's too
+    # Akamai Inference's OpenAI-compatible endpoint: https://docs.crewai.com/en/concepts/llms
+    llm = LLM(
+        model=os.environ["INFERENCE_MODEL"],
+        custom_openai=True,
+        base_url=os.environ["INFERENCE_ENDPOINT"],
+        api_key=os.environ["INFERENCE_API_KEY"],
+        max_tokens=4096,
+        timeout=120,
+    )
 
+    emit("start", run=RUN.id, shard=RUN.shard, request=RUN.request)
+    tools = sort(llm)
+    if tools is None:
+        return
+    question = RUN.kind == "question"
     agent = Agent(
         role="Infrastructure agent",
-        goal=f"Make the reader's change to their Linode infrastructure by proposing OpenTofu code in {RUN.shard}/.",
-        backstory=RULES.format(version=os.environ["LINODE_PROVIDER_VERSION"]),
-        tools=[read_repo, read_cloud, validate, propose_change, wait_for_pipeline, request_apply],
-        # Akamai Inference's OpenAI-compatible endpoint: https://docs.crewai.com/en/concepts/llms
-        llm=LLM(
-            model=os.environ["INFERENCE_MODEL"],
-            custom_openai=True,
-            base_url=os.environ["INFERENCE_ENDPOINT"],
-            api_key=os.environ["INFERENCE_API_KEY"],
-            max_tokens=4096,
-            timeout=120,
-        ),
+        goal="Answer the reader's question about their Linode infrastructure from what you read."
+        if question
+        else f"Make the reader's change to their Linode infrastructure by proposing OpenTofu code in {RUN.shard}/.",
+        backstory=READ_ONLY if question else RULES.format(version=os.environ["LINODE_PROVIDER_VERSION"]),
+        tools=tools,
+        llm=llm,
         max_iter=12,  # bounds the model calls one request can make
         max_retry_limit=0,  # a failure is reported as it happened, not retried
         allow_delegation=False,
     )
     task = Task(
-        description=TASK.format(request=RUN.request, shard=RUN.shard),
-        expected_output="Two or three sentences for the reader: what you proposed, the pipeline's verdict, "
+        description=(QUESTION if question else TASK).format(request=RUN.request, shard=RUN.shard),
+        expected_output="Two or three sentences for the reader: the answer, and which read it came from."
+        if question
+        else "Two or three sentences for the reader: what you proposed, the pipeline's verdict, "
         "and whether it was applied.",
         agent=agent,
     )
@@ -619,7 +734,6 @@ def main():
     # Its tool-result cache is opt-in; it stays off, since a polling tool must never return a stale result.
     crew = Crew(agents=[agent], tasks=[task], memory=False, tracing=False, cache=False)
 
-    emit("start", run=RUN.id, shard=RUN.shard, request=RUN.request)
     try:
         answer = str(crew.kickoff().raw).strip()
     except Exception as error:  # the model call or CrewAI failed: say so, then close the change below

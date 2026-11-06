@@ -67,10 +67,18 @@ tofu output -raw reader_forge_password
    behind the first change, calling no model, until it merges, then plans atop it.
 5. Send two requests with "a new shard": each has its own state and lock, so both plan and apply in
    parallel.
+6. Ask a question, such as "Which firewalls do I have?". Triage, one short model call, sorts every
+   request first: a question gets an agent holding only the read tools, which answers and opens no
+   change. Ask for several changes at once, and the run lists them and stops: send them one at a
+   time, each with its own plan, verdict and approval.
 
 The agent's setup, CrewAI 1.15.33 with GLM-5.3, was verified against Akamai Inference (beta) as of
 2026-10-29; confirm model availability and behaviour in your own account. Beta access and limits
 vary by account; confirm yours in Cloud Manager.
+
+**Closing a change yourself.** Comment `atlantis unlock` on it too, before or after closing it. On
+Gitea, Atlantis keeps the lock of a change closed unmerged until then, and later changes on its
+shard stop, saying so. An agent that stops unlocks its own change.
 
 **Footgun.** Re-applying after you edit any file a VM runs, a policy included, or anything rendered
 into its user data, `reader_cidrs` included, replaces that VM. On the platform VM that wipes the
@@ -97,6 +105,7 @@ From `build/infra/`:
 ## Tests
 
 `uv run pytest` plans the module and renders both VMs' user data, but never applies them. It also
-runs first boot's fetch against a local stand-in for the files bucket, and the gate's fixtures
-through the real code check and policies. It needs OpenTofu 1.13.2 and
-Conftest 0.71.1 on PATH. The providers download from registry.opentofu.org.
+runs first boot's fetch against a local stand-in for the files bucket, the runner's waits and triage
+against stand-ins for the forge and the model, and the gate's fixtures through the real code check
+and policies. It needs OpenTofu 1.13.2 and Conftest 0.71.1 on PATH. The providers download from
+registry.opentofu.org.

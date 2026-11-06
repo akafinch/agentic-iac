@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ask the agent</title>
-<!-- Text only: OpenTofu's file() embeds this page in the agent VM's user data. -->
 <style>
   :root {
     --bg: #ffffff; --fg: #111111; --muted: #555555; --line: #cccccc; --panel: #f4f4f4;
@@ -30,15 +29,17 @@
   .event { margin: 10px 0; }
   .tool { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-weight: 700; }
   .note { font-style: italic; color: var(--muted); }
-  .answer { border-left: 6px solid var(--line); padding-left: 12px; }
+  .triage { font-weight: 700; border-left: 6px solid var(--fg); padding-left: 12px; }
+  .answer { border-left: 6px solid var(--line); padding-left: 12px; white-space: pre-line; }
   pre { margin: 6px 0 0; padding: 10px 12px; background: var(--panel); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font: 18px/1.4 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; max-height: 22em; overflow: auto; }
   .bad { color: var(--block); font-weight: 700; }
   .warn { color: var(--route); font-weight: 700; }
   .good { color: var(--pass); font-weight: 700; }
   a { color: var(--link); font-weight: 700; }
   .done { font-size: 26px; font-weight: 700; padding: 8px 12px; border-radius: 8px; background: var(--panel); }
-  .run.merged { border-color: var(--pass); }
-  .run.closed, .run.failed { border-color: var(--block); }
+  .run.ended-good { border-color: var(--pass); }
+  .run.ended-warn { border-color: var(--route); }
+  .run.ended-bad { border-color: var(--block); }
 </style>
 </head>
 <body>
@@ -64,6 +65,10 @@
 
 const form = document.getElementById("ask");
 const runs = document.getElementById("runs");
+// How a run's outcome colours it: green when it merged or answered, amber when triage ended it
+// (several changes), red otherwise.
+const TONE = { merged: "good", answered: "good", "several changes": "warn" };
+const tone = (outcome) => TONE[outcome] || "bad";
 
 form.addEventListener("submit", async (submitted) => {
   submitted.preventDefault();
@@ -106,7 +111,7 @@ function follow(run) {
     if (event.kind === "model") { modelCalls += 1; showMeta(); return; }
     show(log, event);
     if (event.kind === "done") {
-      panel.classList.add(event.outcome === "merged" ? "merged" : event.outcome === "closed" ? "closed" : "failed");
+      panel.classList.add("ended-" + tone(event.outcome));
       source.close();
     }
   };
@@ -130,12 +135,14 @@ function show(log, event) {
     if (/^https?:\/\//.test(event.url)) link.href = event.url;
     link.target = "_blank";
     link.rel = "noopener";
+  } else if (event.kind === "triage") {
+    add(row, "div", "triage", event.text);
   } else if (event.kind === "note") {
     add(row, "div", "note", event.text);
   } else if (event.kind === "answer") {
     add(row, "div", "answer", event.text);
   } else if (event.kind === "done") {
-    add(row, "div", "done " + (event.outcome === "merged" ? "good" : "bad"), event.text);
+    add(row, "div", "done " + tone(event.outcome), event.text);
   }
 }
 
