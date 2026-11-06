@@ -577,11 +577,11 @@ TOOLS = {
 }
 TOOLS["unsorted"] = TOOLS["change"]
 
-SORTED = {
-    "question": "a question. The agent gets only read_repo and read_cloud, so this run can change nothing.",
-    "change": "one change. The agent gets its tools for proposing it.",
-    "unsorted": "no answer it could read, so the run goes ahead as one change.",
-    "several": "{count} changes, so the run ends here: one change per request.",
+SORTED = {  # the page's line for each sort
+    "question": "Triage: a question. The agent gets only read_repo and read_cloud, so this run can change nothing.",
+    "change": "Triage sorted this as one change, so the agent keeps all its tools.",
+    "unsorted": "Triage: no answer it could read, so the run goes ahead as one change.",
+    "several": "Triage: {count} changes, so the run ends here: one change per request.",
 }
 
 
@@ -610,7 +610,7 @@ def sort(llm):
     """Triage the request and show the result on the page. Returns the agent's tools, or None when
     the run ends here, its changes listed, since it asked for several."""
     RUN.kind, changes = triage(llm, RUN.request)
-    emit("triage", sorted_as=RUN.kind, text="Triage: " + SORTED[RUN.kind].format(count=len(changes)))
+    emit("triage", sorted_as=RUN.kind, text=SORTED[RUN.kind].format(count=len(changes)))
     if RUN.kind != "several":
         return TOOLS[RUN.kind]
     listed = "\n".join(f"{number}. {change}" for number, change in enumerate(changes, 1))

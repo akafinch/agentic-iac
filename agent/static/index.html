@@ -136,7 +136,8 @@ function show(log, event) {
     link.target = "_blank";
     link.rel = "noopener";
   } else if (event.kind === "triage") {
-    add(row, "div", "triage", event.text);
+    // A request sorted as one change goes ahead as it would without triage, so its line is a quiet note.
+    add(row, "div", event.sorted_as === "change" ? "note" : "triage", event.text);
   } else if (event.kind === "note") {
     add(row, "div", "note", event.text);
   } else if (event.kind === "answer") {
